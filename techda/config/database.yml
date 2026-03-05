@@ -5,6 +5,8 @@ default_env: &default
 
 development:
   <<: *default
+  # No host/port = use Unix socket (peer auth, no password).
+  # If you see "no password supplied" over TCP, keep this. If you see "socket not found", add: host: 127.0.0.1 and username/password below.
 
 production:
   <<: *default

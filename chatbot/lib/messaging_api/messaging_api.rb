@@ -22,10 +22,14 @@ require "./lib/messaging_api/src/auth"
 warn_level = $VERBOSE
 $VERBOSE = nil
 
-Line::Bot::API::DEFAULT_OAUTH_ENDPOINT = "http://localhost:8080"
-Line::Bot::API::DEFAULT_ENDPOINT = "http://localhost:8080/v2"
-Line::Bot::API::DEFAULT_BLOB_ENDPOINT = "http://localhost:8080/api-data/v2"
-Line::Bot::API::DEFAULT_LIFF_ENDPOINT = "http://localhost:8080/liff/v1"
+# Single-process mode: bot and web UI run together. Line API calls (e.g. reply_message)
+# go to this app. Default 9292 so one rackup process works without a separate proxy on 8080.
+LINE_BOT_BASE = (ENV["LINE_BOT_BASE_URL"].to_s.strip.empty? ? "http://localhost:9292" : ENV["LINE_BOT_BASE_URL"].to_s.strip).freeze
+
+Line::Bot::API::DEFAULT_OAUTH_ENDPOINT = LINE_BOT_BASE
+Line::Bot::API::DEFAULT_ENDPOINT = "#{LINE_BOT_BASE}/v2"
+Line::Bot::API::DEFAULT_BLOB_ENDPOINT = "#{LINE_BOT_BASE}/api-data/v2"
+Line::Bot::API::DEFAULT_LIFF_ENDPOINT = "#{LINE_BOT_BASE}/liff/v1"
 
 $VERBOSE = warn_level
 
@@ -115,21 +119,27 @@ post '/api' do
 
     # events に event を追加
     content["events"].append(event)
-    
-    # BOT にリクエストを送信
-    uri = URI.parse("http://localhost:8080/callback")
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = uri.scheme === "https"
-    headers = { "X-Line-Signature" => Base64.encode64(OpenSSL::HMAC.digest(OpenSSL::Digest.new('sha256'), ENV["LINE_CHANNEL_SECRET"], content.to_json)).chomp }
 
-    response = http.post(uri.path, content.to_json, headers)
-
-    # エラーが発生した場合は 500 エラーを返す
-    if response.code != "200"
-        status 500
+    # Forward to the Line bot callback (default: same app at LINE_BOT_BASE/callback)
+    callback_url = ENV["LINE_CALLBACK_URL"].to_s.strip
+    callback_url = "#{LINE_BOT_BASE}/callback" if callback_url.empty?
+    begin
+      uri = URI.parse(callback_url)
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = uri.scheme == "https"
+      http.open_timeout = 5
+      http.read_timeout = 5
+      secret = ENV["LINE_CHANNEL_SECRET"] || ""
+      signature = Base64.encode64(OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha256"), secret, content.to_json)).chomp
+      headers = { "X-Line-Signature" => signature, "Content-Type" => "application/json" }
+      response = http.post(uri.path, content.to_json, headers)
+      if response.code != "200"
+        warn "Line callback returned #{response.code}: #{response.body[0, 200]}"
+      end
+    rescue Errno::ECONNREFUSED, Errno::ETIMEDOUT, SocketError => e
+      warn "Line callback not reachable (#{callback_url}): #{e.message}"
     end
 
-    # 成功時は OK
     "OK"
 end
 
